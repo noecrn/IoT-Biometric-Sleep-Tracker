@@ -44,13 +44,29 @@ pip install -r requirements.txt
 make prepare     # Preprocess and generate features
 make train       # Train model on all users
 make eval        # Evaluate model
+make train_final # Final model training and scaling
 ```
 
-## 📊 Results Preview
+## 📊 Final Results
 
-![Sleep Detection Accuracy](reports/model_comparison.png)
+After several iterations of feature engineering and model tuning, the final model is a **Tuned XGBoost Classifier**. It achieves the following performance on the hold-out test set:
 
-For a detailed description of the pipeline and evaluation results see the [full report](reports/REPORT.md).
+**Classification Report (Sleep Detection)**
+```
+              precision    recall  f1-score   support
+
+   False           0.99      0.93      0.96      4893
+    True           0.76      0.95      0.85      1182
+
+accuracy                               0.93      6075
+
+macro avg          0.87      0.94      0.90      6075
+weighted avg       0.94      0.93      0.94      6075
+```
+
+## 💡 Key Findings
+
+The most significant performance improvement did not come from hyperparameter tuning, but from **feature engineering**. The addition of **rolling statistics** (e.g., mean and standard deviation of heart rate and activity over 5 and 15-minute windows) was the key factor in boosting the F1-score for sleep detection from ~0.76 to **0.85**.
 
 ## 📎 Notes
 
