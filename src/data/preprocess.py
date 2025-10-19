@@ -1,3 +1,5 @@
+# src/data/preprocess.py
+
 import pandas as pd
 from pathlib import Path
 from src.data.load_data import load_rr_data, load_actigraph_data, load_user_data
@@ -34,61 +36,51 @@ def prepare_user_data(user_id: str, raw_base="../data/raw", out_base="../data/pr
     
 def window_features(df: pd.DataFrame, user_id: str, freq: str = "60s") -> pd.DataFrame:
     """
-    Extracts rolling window features from processed user data, including additional rolling mean, std, and diff features for selected columns.
-
-    Args:
-        df (pd.DataFrame): processed data with 'timestamp' column.
-        freq (str): window duration (e.g. '60s', '30s').
-
-    Returns:
-        pd.DataFrame: one row per window with extracted features and additional rolling/diff features.
+    Extracts window features from processed user data, including rolling statistics
+    calculated on the high-frequency signal.
     """
-    # Vérifie que toutes les colonnes nécessaires sont là
+    # Verify necessary columns are present
     expected_cols = ["HR", "Vector Magnitude", "Steps"]
-    missing = [col for col in expected_cols if col not in df.columns]
-    if missing:
-        print(f"⚠️ Colonnes manquantes pour {user_id} : {missing}")
+    if not all(col in df.columns for col in expected_cols):
+        print(f"⚠️  Skipping {user_id} due to missing columns: {set(expected_cols) - set(df.columns)}")
         return pd.DataFrame()
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp")
-    df = df.sort_index()
+    df = df.set_index("timestamp").sort_index()
 
-    features = df.resample(freq).agg({
+    # --- FEATURE ENGINEERING: ROLLING STATISTICS ---
+    # Calculate rolling stats on the high-frequency data before aggregation.
+    # Window sizes are in seconds (e.g., 300s = 5 minutes, 900s = 15 minutes).
+    windows = ['300s', '900s']
+    for window in windows:
+        # Rolling mean and standard deviation for Heart Rate and Activity
+        df[f'hr_roll_mean_{window}'] = df['HR'].rolling(window=window, min_periods=1).mean()
+        df[f'hr_roll_std_{window}'] = df['HR'].rolling(window=window, min_periods=1).std()
+        df[f'vm_roll_mean_{window}'] = df['Vector Magnitude'].rolling(window=window, min_periods=1).mean()
+
+    # Fill NaNs created by rolling windows. Forward-fill then back-fill.
+    df.ffill(inplace=True)
+    df.bfill(inplace=True)
+    
+    # --- AGGREGATION ---
+    # Define how to aggregate each column into the final time windows (e.g., 60s).
+    agg_dict = {
         "HR": ["mean", "std"],
         "Vector Magnitude": ["mean", "std"],
         "Steps": "sum"
-    })
+    }
+    # Add the new rolling feature columns to the aggregation dictionary.
+    # We take the mean of the rolling features over the final window.
+    for col in df.columns:
+        if 'roll_mean' in col or 'roll_std' in col:
+            agg_dict[col] = 'mean'
 
-    # Flatten MultiIndex columns
+    features = df.resample(freq).agg(agg_dict)
+
+    # Flatten the column names (e.g., ('HR', 'mean') -> 'hr_mean')
     features.columns = ["_".join(col).lower() for col in features.columns]
     features = features.reset_index()
     features["user_id"] = user_id
-
-    # Additional engineered features with corrected column names
-    rolling_cols = {
-        "hr_mean": "hr_mean_roll3",
-        "vector magnitude_mean": "vector_magnitude_mean_roll3",
-        "steps_sum": "steps_sum_roll3"
-    }
-
-    for col, new_col in rolling_cols.items():
-        if col in features.columns:
-            features[new_col] = features[col].rolling(window=3, min_periods=1).mean()
-        else:
-            print(f"⚠️ Column not found for rolling calculation: {col}")
-
-    diff_cols = {
-        "hr_mean": "hr_mean_diff",
-        "vector magnitude_mean": "vector_magnitude_mean_diff",
-        "steps_sum": "steps_sum_diff"
-    }
-
-    for col, new_col in diff_cols.items():
-        if col in features.columns:
-            features[new_col] = features[col].diff().fillna(0)
-        else:
-            print(f"⚠️ Column not found for diff calculation: {col}")
 
     return features
 

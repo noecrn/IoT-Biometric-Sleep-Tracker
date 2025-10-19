@@ -1,3 +1,5 @@
+# src/models/evaluate_models.py
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -15,7 +17,18 @@ def compare_models(X_train, X_test, y_train, y_test):
 
     models = {
         "LogisticRegression": LogisticRegression(max_iter=1000, class_weight='balanced'),
-        "RandomForest": RandomForestClassifier(random_state=42, class_weight='balanced', n_jobs=-1),
+        # New, tuned RandomForest model
+        "RandomForest": RandomForestClassifier(
+            class_weight='balanced',
+            # --- Tuned Parameters ---
+            n_estimators=291,
+            max_depth=21,
+            min_samples_split=3,
+            min_samples_leaf=6,
+            max_features='log2',
+            random_state=42,
+            n_jobs=-1 # You can set this back to -1 here for the final run
+        ),
         # New, tuned XGBoost model
         "XGBoost": XGBClassifier(
             use_label_encoder=False,
