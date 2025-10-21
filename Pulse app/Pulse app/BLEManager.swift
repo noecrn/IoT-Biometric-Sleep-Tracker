@@ -25,6 +25,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var connectionStatus: String = "Déconnecté"
     @Published var isConnected: Bool = false
     
+    let heartRateCharacteristicUUID = CBUUID(string: "2A37")
+    
     // MARK: - Initialisation
     
     override init() {
@@ -115,33 +117,53 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     // MARK: - Réception des Données
 
-    // Cette fonction est appelée chaque fois que l'appareil Pulse envoie de nouvelles données.
+    // Cette fonction est appelée chaque fois que l'appareil envoie de nouvelles données.
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value else { return }
         
-        // 'data' contient les octets bruts envoyés par l'appareil.
-        // C'est ici que tu devras ajouter la logique pour décoder ces données
-        // et les envoyer au DataProcessor.
-        
-        // On garde notre exemple de décodage de chaîne de caractères
-        if let stringData = String(data: data, encoding: .utf8) {
-            print("Données décodées (String): \(stringData)")
+        // On vérifie si les données proviennent de la caractéristique de Fréquence Cardiaque (2A37)
+        if characteristic.uuid == heartRateCharacteristicUUID {
+            
+            // On décode les octets bruts pour obtenir la fréquence cardiaque
+            let hrValue = parseHeartRate(from: data)
+            print(">>> Fréquence Cardiaque (Garmin): \(hrValue) BPM")
 
-            // On sépare la chaîne "72.5,0.1,0.2,0.9" en un tableau de nombres
-            let values = stringData.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-
-            // On s'assure qu'on a bien reçu 4 valeurs (HR, X, Y, Z)
-            if values.count == 4 {
-                let heartRate = values[0]
-                let accelX = values[1]
-                let accelY = values[2]
-                let accelZ = values[3]
-
-                // On envoie les données au DataProcessor !
-                DispatchQueue.main.async {
-                    self.dataProcessor?.add(heartRate: heartRate, accelX: accelX, accelY: accelY, accelZ: accelZ)
-                }
+            // --- ENVOI AU DATAPROCESSOR ---
+            // Notre DataProcessor attend 4 valeurs (HR, X, Y, Z).
+            // La Garmin n'envoie pas l'accéléromètre de cette façon.
+            // Pour ce TEST, nous allons envoyer des fausses données (0) pour l'accéléromètre
+            // afin de prouver que notre pipeline de données fonctionne.
+            DispatchQueue.main.async {
+                self.dataProcessor?.add(heartRate: Double(hrValue), accelX: 0.0, accelY: 0.0, accelZ: 0.0)
             }
+            
+        } else {
+            // C'est une autre caractéristique, on l'ignore pour l'instant
+            print("Données reçues (Autre): \(characteristic.uuid.uuidString) - \(data.count) octets")
+        }
+    }
+    
+    /// Décode les données brutes (raw bytes) de la caractéristique 2A37.
+    private func parseHeartRate(from data: Data) -> Int {
+        // Convertit l'objet Data en un tableau d'octets [UInt8]
+        let bytes = [UInt8](data)
+        
+        // Le premier octet (bytes[0]) contient les drapeaux (flags)
+        let flags = bytes[0]
+        
+        // On vérifie le premier bit (Bit 0) des drapeaux.
+        // S'il est à 0, la fréquence est sur 8 bits (1 octet).
+        // S'il est à 1, la fréquence est sur 16 bits (2 octets).
+        let is16Bit = (flags & 0x01) != 0
+        
+        if is16Bit {
+            // La fréquence est sur 2 octets (bytes[1] et bytes[2])
+            let heartRate: UInt16 = (UInt16(bytes[1]) & 0xFF) | (UInt16(bytes[2]) << 8)
+            return Int(heartRate)
+        } else {
+            // La fréquence est sur 1 octet (bytes[1])
+            let heartRate: UInt8 = bytes[1]
+            return Int(heartRate)
         }
     }
 }
