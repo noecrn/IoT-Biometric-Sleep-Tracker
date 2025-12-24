@@ -8,18 +8,33 @@
 import SwiftUI
 import Charts
 
+/// The primary interface for the sleep tracking dashboard.
+///
+/// This view manages three distinct application states:
+/// 1. **Empty State:** When no device is connected and no data is imported.
+/// 2. **Loading State:** When the app is processing a large dataset (e.g., CSV import).
+/// 3. **Dashboard State:** Displaying live metrics or post-sleep analysis reports.
 struct DashboardView: View {
+    
+    // MARK: - Dependencies
+    
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var dataProcessor: DataProcessor
     
-    // Logic
+    // MARK: - Private Properties
+    
+    /// The Core ML wrapper responsible for predicting sleep stages.
     private let predictor = SleepPredictor()
+    
+    /// Tracks the real-time sleep status (Awake/Asleep) for UI updates.
     @State private var isSleeping: Bool = false
 
+    // MARK: - View Body
+    
     var body: some View {
         NavigationStack {
             ZStack {
-                // 1. GLOBAL BACKGROUND (Deep Night Theme)
+                // 1. Global Background (Deep Night Theme)
                 LinearGradient(
                     colors: [Color(red: 0.05, green: 0.05, blue: 0.15), Color.black],
                     startPoint: .top,
@@ -27,65 +42,74 @@ struct DashboardView: View {
                 )
                 .ignoresSafeArea()
                 
-                // 2. MAIN CONTENT SWITCHER
+                // 2. Main Content Switcher based on App State
                 if dataProcessor.isAnalyzing {
-                    // STATE A: LOADING
                     LoadingView()
                     
                 } else if isDataAvailable {
-                    // STATE B: DASHBOARD (Data Present)
-                    ScrollView {
-                        VStack(spacing: 25) {
-                            
-                            // 1. LIVE HEART RATE (Only show if live data exists)
-                            if !dataProcessor.featureVector.isEmpty {
-                                MetricCard(
-                                    title: "Heart Rate",
-                                    value: String(format: "%.0f", dataProcessor.currentHeartRate),
-                                    unit: "BPM",
-                                    icon: "heart.fill",
-                                    color: .red
-                                )
-                                .padding(.top, 20)
-                            }
-
-                            // 2. SLEEP REPORT & CHART (Only show if report exists)
-                            if let report = dataProcessor.lastSleepReport {
-                                SleepReportCard(report: report, data: dataProcessor.hrHistory)
-                                    .padding(.top, dataProcessor.featureVector.isEmpty ? 20 : 0)
-                            }
-                            
-                            // REMOVED: DebugFooter (ML Feature Vector is gone)
-                        }
-                        .padding()
-                    }
+                    mainDashboardContent
                     
                 } else {
-                    // STATE C: EMPTY STATE (No Data)
                     EmptyStateView()
                 }
             }
             .navigationTitle("Pulse Monitor")
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        // Keep the prediction logic running in the background for live updates
+        // React to new sensor data for live sleep prediction
         .onReceive(dataProcessor.$featureVector) { newFeatures in
             guard !newFeatures.isEmpty else { return }
+            
+            // Perform prediction
             let result = predictor.predict(features: newFeatures)
+            
+            // Update UI state with a smooth spring animation
             withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
                 self.isSleeping = (result == 1)
             }
         }
     }
     
-    // Helper to check if we should show ANY content
+    // MARK: - Computed Properties
+    
+    /// The main scrollable content view shown when data is present.
+    private var mainDashboardContent: some View {
+        ScrollView {
+            VStack(spacing: 25) {
+                
+                // A. Live Heart Rate Card
+                // Only displayed when live sensor data is actively streaming.
+                if !dataProcessor.featureVector.isEmpty {
+                    MetricCard(
+                        title: "Heart Rate",
+                        value: String(format: "%.0f", dataProcessor.currentHeartRate),
+                        unit: "BPM",
+                        icon: "heart.fill",
+                        color: .red
+                    )
+                    .padding(.top, 20)
+                }
+
+                // B. Sleep Session Report
+                // Displayed when a full session (live or CSV) has been analyzed.
+                if let report = dataProcessor.lastSleepReport {
+                    SleepReportCard(report: report, data: dataProcessor.hrHistory)
+                        .padding(.top, dataProcessor.featureVector.isEmpty ? 20 : 0)
+                }
+            }
+            .padding()
+        }
+    }
+    
+    /// Determines if the dashboard should show content or the empty state.
     private var isDataAvailable: Bool {
         return !dataProcessor.featureVector.isEmpty || dataProcessor.lastSleepReport != nil
     }
 }
 
-// MARK: - SUBVIEWS
+// MARK: - Subviews & Components
 
+/// A placeholder view shown when no data source is active.
 struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 20) {
@@ -110,6 +134,7 @@ struct EmptyStateView: View {
     }
 }
 
+/// A loading indicator shown during batch analysis.
 struct LoadingView: View {
     var body: some View {
         VStack(spacing: 15) {
@@ -125,6 +150,7 @@ struct LoadingView: View {
     }
 }
 
+/// A generic card component for displaying a single live metric.
 struct MetricCard: View {
     let title: String
     let value: String
@@ -164,6 +190,7 @@ struct MetricCard: View {
     }
 }
 
+/// Displays a comprehensive report of a sleep session, including stats and a chart.
 struct SleepReportCard: View {
     let report: SleepReport
     let data: [ChartDataPoint]
@@ -177,14 +204,14 @@ struct SleepReportCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding([.top, .leading, .trailing])
             
-            // Chart
+            // Interactive Chart
             ModernChart(data: data)
                 .frame(height: 200)
                 .padding(.vertical)
             
             Divider().background(Color.white.opacity(0.1))
             
-            // Stats Grid
+            // Statistics Grid
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 20) {
                 StatItem(label: "Bedtime", value: report.bedTime, icon: "moon.zzz.fill", color: .indigo)
                 StatItem(label: "Wake Up", value: report.wakeTime, icon: "sun.max.fill", color: .orange)
@@ -202,17 +229,24 @@ struct SleepReportCard: View {
     }
 }
 
+// MARK: - Chart Components
+
+/// An interactive chart visualizing Heart Rate history over time.
+/// Supports drag gestures to inspect specific data points.
 struct ModernChart: View {
     let data: [ChartDataPoint]
     
+    // Interaction State
     @State private var selectedDate: Date?
     @State private var selectedHR: Double?
     
+    // Dynamic Scale Calculation
     var minHR: Double { data.map { $0.value }.min() ?? 40 }
     var maxHR: Double { data.map { $0.value }.max() ?? 140 }
     
     var body: some View {
         VStack(alignment: .leading) {
+            // Context Header: Shows details when dragging, or a hint otherwise.
             if let selectedHR, let selectedDate {
                 HStack(alignment: .firstTextBaseline) {
                     Text("\(Int(selectedHR)) BPM")
@@ -229,6 +263,7 @@ struct ModernChart: View {
                     .foregroundStyle(.gray.opacity(0.5))
             }
             
+            // Chart Implementation
             Chart {
                 ForEach(data) { point in
                     LineMark(
@@ -240,6 +275,7 @@ struct ModernChart: View {
                     .lineStyle(StrokeStyle(lineWidth: 3))
                 }
                 
+                // Interactive Cursor (Visible on Drag)
                 if let selectedDate, let selectedHR {
                     RuleMark(x: .value("Selected Time", selectedDate))
                         .foregroundStyle(Color.white.opacity(0.3))
@@ -281,6 +317,7 @@ struct ModernChart: View {
                     AxisValueLabel().foregroundStyle(Color.white.opacity(0.5))
                 }
             }
+            // Gesture Handling for Interactivity
             .chartOverlay { proxy in
                 GeometryReader { geometry in
                     Rectangle().fill(.clear).contentShape(Rectangle())
@@ -288,7 +325,9 @@ struct ModernChart: View {
                             DragGesture()
                                 .onChanged { value in
                                     let startX = value.location.x
+                                    // Map X position to Date
                                     if let currentXDate: Date = proxy.value(atX: startX) {
+                                        // Find closest data point
                                         if let closestPoint = data.min(by: { abs($0.date.timeIntervalSince(currentXDate)) < abs($1.date.timeIntervalSince(currentXDate)) }) {
                                             self.selectedDate = closestPoint.date
                                             self.selectedHR = closestPoint.value
@@ -296,6 +335,7 @@ struct ModernChart: View {
                                     }
                                 }
                                 .onEnded { _ in
+                                    // Reset interaction state
                                     withAnimation {
                                         self.selectedDate = nil
                                         self.selectedHR = nil
@@ -310,6 +350,7 @@ struct ModernChart: View {
     }
 }
 
+/// Helper view for individual statistics within the sleep report grid.
 struct StatItem: View {
     let label: String
     let value: String

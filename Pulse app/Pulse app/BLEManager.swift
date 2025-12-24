@@ -9,159 +9,198 @@ import Foundation
 import CoreBluetooth
 import Combine
 
-// Rend notre classe observable par SwiftUI pour que l'interface se mette à jour.
+/// A singleton-like manager responsible for all Bluetooth Low Energy (BLE) interactions.
+///
+/// This class handles the lifecycle of the Bluetooth connection, including:
+/// - Scanning for specific peripherals (e.g., "Forerunner 255").
+/// - Connecting and discovering services.
+/// - Subscribing to characteristic notifications (specifically Heart Rate).
+/// - Decoding raw byte data into usable integer values.
 class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     
-    // MARK: - Propriétés
+    // MARK: - Properties
     
-    // Le "chef d'orchestre" du Bluetooth. Il scanne, se connecte, etc.
+    /// The central manager that orchestrates all Bluetooth actions.
     var centralManager: CBCentralManager!
-    // L'appareil Pulse auquel nous sommes connectés.
+    
+    /// The connected peripheral device (e.g., the Pulse bracelet or Garmin watch).
+    /// We keep a strong reference to prevent it from being deallocated during connection.
     var pulsePeripheral: CBPeripheral?
-    // Contient la référence vers notre DataProcessor.
+    
+    /// Reference to the data processor for ingesting live sensor readings.
     var dataProcessor: DataProcessor?
 
-    // @Published permet à SwiftUI de réagir automatiquement aux changements de ces variables.
-    @Published var connectionStatus: String = "Déconnecté"
+    // MARK: - Published States
+    
+    /// A user-friendly string describing the current connection state (e.g., "Scanning...", "Connected").
+    @Published var connectionStatus: String = "Disconnected"
+    
+    /// A boolean flag indicating if the device is currently connected and ready.
     @Published var isConnected: Bool = false
+    
+    /// The latest heart rate value received from the device, in Beats Per Minute (BPM).
     @Published var heartRate: Int? = nil
     
+    // MARK: - Constants
     
-    let heartRateCharacteristicUUID = CBUUID(string: "2A37")
+    /// The standard BLE UUID for the Heart Rate Measurement characteristic (0x2A37).
+    private let heartRateCharacteristicUUID = CBUUID(string: "2A37")
     
-    // MARK: - Initialisation
+    // MARK: - Initialization
     
     override init() {
         super.init()
-        // On initialise le chef d'orchestre. Le "delegate: self" signifie que
-        // cette classe (BLEManager) recevra tous les événements Bluetooth.
+        // Initialize the Central Manager.
+        // 'delegate: self' ensures this class receives state updates and discovery events.
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
 
-    // MARK: - Logique de Scan et Connexion
+    // MARK: - CBCentralManagerDelegate Methods
 
-    // Cette fonction est appelée automatiquement quand l'état du Bluetooth change (allumé, éteint...).
+    /// Called whenever the Bluetooth hardware state changes (Powered On, Off, Unauthorized, etc.).
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
-            connectionStatus = "Bluetooth activé. Recherche..."
-            // Le Bluetooth est prêt, on lance le scan pour trouver notre appareil.
+            connectionStatus = "Bluetooth ON. Scanning..."
+            // Start scanning for devices. Passing nil scans for all devices (not recommended for production, but useful for testing).
             centralManager.scanForPeripherals(withServices: nil, options: nil)
         } else {
-            connectionStatus = "Bluetooth non disponible."
+            connectionStatus = "Bluetooth unavailable."
             isConnected = false
         }
     }
 
-    // Cette fonction est appelée chaque fois qu'un appareil BLE est trouvé.
+    /// Called when a peripheral is discovered during the scan.
+    ///
+    /// - Parameters:
+    ///   - central: The central manager providing the update.
+    ///   - peripheral: The discovered peripheral device.
+    ///   - advertisementData: A dictionary containing advertisement data.
+    ///   - RSSI: The current signal strength (Received Signal Strength Indicator).
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        // NOTE: Il faudra adapter cette condition au nom de ton appareil.
-        // Pour l'instant, on se connecte au premier appareil trouvé qui a un nom.
+        // Filter devices by name.
+        // TODO: Replace "Forerunner 255" with your specific device name.
         if let peripheralName = peripheral.name, peripheralName.contains("Forerunner 255") {
-            print("Appareil Pulse trouvé: \(peripheralName)")
+            print("Pulse Device Found: \(peripheralName)")
             
+            // 1. Save reference to the peripheral
             self.pulsePeripheral = peripheral
             self.pulsePeripheral?.delegate = self
             
-            // On a trouvé notre appareil, on arrête de scanner.
+            // 2. Stop scanning to save battery
             centralManager.stopScan()
             
-            // On se connecte à l'appareil.
+            // 3. Initiate connection
             centralManager.connect(peripheral, options: nil)
-            connectionStatus = "Connexion à \(peripheralName)..."
+            connectionStatus = "Connecting to \(peripheralName)..."
         }
     }
 
-    // Cette fonction est appelée quand la connexion réussit.
+    /// Called when the connection to the peripheral is successful.
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        connectionStatus = "Connecté à \(peripheral.name ?? "Pulse")"
+        connectionStatus = "Connected to \(peripheral.name ?? "Pulse Device")"
         isConnected = true
-        print("Connexion réussie !")
+        print("Connection Successful!")
         
-        // Maintenant qu'on est connecté, on cherche les "services" qu'il propose.
+        // Discover available services on the device.
         peripheral.discoverServices(nil)
     }
 
-    // Cette fonction est appelée si la connexion échoue ou est perdue.
+    /// Called when the device disconnects (unexpectedly or intentionally).
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        connectionStatus = "Déconnecté"
+        connectionStatus = "Disconnected"
         isConnected = false
-        print("Appareil déconnecté. Reprise du scan...")
-        // On relance le scan pour le retrouver.
+        print("Device disconnected. Restarting scan...")
+        
+        // Automatically restart scanning to attempt reconnection.
         centralManager.scanForPeripherals(withServices: nil, options: nil)
     }
     
-    // MARK: - Découverte des Services et Caractéristiques
+    // MARK: - CBPeripheralDelegate Methods (Services & Characteristics)
 
-    // Cette fonction est appelée quand les services de l'appareil ont été trouvés.
+    /// Called when services are discovered on the connected peripheral.
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard let services = peripheral.services else { return }
+        
         for service in services {
-            print("Service trouvé: \(service.uuid.uuidString)")
-            // Pour chaque service, on cherche les "caractéristiques" (les canaux de communication).
+            print("Service Discovered: \(service.uuid.uuidString)")
+            // Discover characteristics for each service.
             peripheral.discoverCharacteristics(nil, for: service)
         }
     }
 
-    // Cette fonction est appelée quand les caractéristiques d'un service ont été trouvées.
+    /// Called when characteristics are discovered for a specific service.
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let characteristics = service.characteristics else { return }
+        
         for characteristic in characteristics {
-            print("Caractéristique trouvée: \(characteristic.uuid.uuidString)")
+            print("Characteristic Discovered: \(characteristic.uuid.uuidString)")
             
-            // On vérifie si c'est la caractéristique qui nous intéresse (celle qui envoie des données).
-            // On s'abonne aux notifications pour recevoir les données en temps réel.
+            // Check if the characteristic supports notifications (real-time data stream).
             if characteristic.properties.contains(.notify) {
-                print("Abonnement aux données de la caractéristique \(characteristic.uuid.uuidString)...")
+                print("Subscribing to characteristic \(characteristic.uuid.uuidString)...")
                 peripheral.setNotifyValue(true, for: characteristic)
             }
         }
     }
     
-    // MARK: - Réception des Données
+    // MARK: - Data Handling
 
-    // Cette fonction est appelée chaque fois que l'appareil envoie de nouvelles données.
+    /// Called when a characteristic updates its value (e.g., new heart rate data arrives).
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value else { return }
         
-        // On vérifie si les données proviennent de la caractéristique de Fréquence Cardiaque (2A37)
+        // Handle Heart Rate Measurement (UUID 2A37)
         if characteristic.uuid == heartRateCharacteristicUUID {
             
-            // On décode les octets bruts pour obtenir la fréquence cardiaque
             let hrValue = parseHeartRate(from: data)
-            print(">>> Fréquence Cardiaque (Garmin): \(hrValue) BPM")
+            print(">>> Heart Rate: \(hrValue) BPM")
 
+            // Update the UI and DataProcessor on the main thread
             DispatchQueue.main.async {
                 self.heartRate = hrValue
+                // Pass data to the processor (Accelerometer data is mocked as 0.0 for now if using a standard HR monitor)
                 self.dataProcessor?.add(heartRate: Double(hrValue), accelX: 0.0, accelY: 0.0, accelZ: 0.0)
             }
             
         } else {
-            // C'est une autre caractéristique, on l'ignore pour l'instant
-            print("Données reçues (Autre): \(characteristic.uuid.uuidString) - \(data.count) octets")
+            // Handle other characteristics here
+            print("Received data from: \(characteristic.uuid.uuidString) - \(data.count) bytes")
         }
     }
     
-    /// Décode les données brutes (raw bytes) de la caractéristique 2A37.
+    // MARK: - Helper Methods
+    
+    /// Decodes the raw byte data from the standard BLE Heart Rate characteristic.
+    ///
+    /// The standard defines flags in the first byte that determine the format of the subsequent bytes.
+    /// - Parameter data: The raw `Data` object received from Bluetooth.
+    /// - Returns: The heart rate as an `Int`.
     private func parseHeartRate(from data: Data) -> Int {
-        // Convertit l'objet Data en un tableau d'octets [UInt8]
         let bytes = [UInt8](data)
+        guard !bytes.isEmpty else { return 0 }
         
-        // Le premier octet (bytes[0]) contient les drapeaux (flags)
+        // The first byte contains flags
         let flags = bytes[0]
         
-        // On vérifie le premier bit (Bit 0) des drapeaux.
-        // S'il est à 0, la fréquence est sur 8 bits (1 octet).
-        // S'il est à 1, la fréquence est sur 16 bits (2 octets).
+        // Check the first bit (Bit 0) to determine format:
+        // 0 = 8-bit Heart Rate (UINT8)
+        // 1 = 16-bit Heart Rate (UINT16)
         let is16Bit = (flags & 0x01) != 0
         
         if is16Bit {
-            // La fréquence est sur 2 octets (bytes[1] et bytes[2])
-            let heartRate: UInt16 = (UInt16(bytes[1]) & 0xFF) | (UInt16(bytes[2]) << 8)
-            return Int(heartRate)
+            // HR Value is in the 2nd and 3rd bytes (Little Endian)
+            if bytes.count >= 3 {
+                let heartRate = (UInt16(bytes[1]) & 0xFF) | (UInt16(bytes[2]) << 8)
+                return Int(heartRate)
+            }
         } else {
-            // La fréquence est sur 1 octet (bytes[1])
-            let heartRate: UInt8 = bytes[1]
-            return Int(heartRate)
+            // HR Value is in the 2nd byte
+            if bytes.count >= 2 {
+                let heartRate = bytes[1]
+                return Int(heartRate)
+            }
         }
+        
+        return 0 // Fallback if data is malformed
     }
 }
